@@ -1,0 +1,15 @@
+[project]
+name = "tabby-english"
+version = "0.1.0"
+description = "IDE의 자동완성처럼, 영어로 말하다 막히는 순간 다음 표현을 띄워주는 회화 코칭 에이전트"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "python-dotenv>=1.0.0",
+]
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+]
