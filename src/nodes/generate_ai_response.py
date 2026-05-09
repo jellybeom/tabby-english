@@ -27,7 +27,7 @@ def _get_llm() -> ChatOpenAI:
         _llm = ChatOpenAI(
             model="gpt-4o-mini",
             temperature=0.7,
-            model_kwargs={"max_tokens": 200},
+            max_tokens=200,
         )
     return _llm
 

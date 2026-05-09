@@ -1,12 +1,58 @@
-# Python-generated files
+# ─── 환경 변수 (절대 커밋 금지) ───
+.env
+.env.local
+.env.*.local
+
+# ─── Python 가상환경 ───
+.venv/
+venv/
+env/
+
+# ─── Python 캐시 ───
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+
+# ─── 패키지 매니저 ───
+# uv: lock 파일은 팀 협업 시 커밋 권장이지만 학습 단계에서는 무시
+uv.lock
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ─── 정적 분석 / 테스트 캐시 ───
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─── Jupyter ───
+.ipynb_checkpoints/
+# Notebook 출력 결과는 협업 시 커밋 여부 논쟁이 있는데,
+# 학습 프로젝트라 출력 결과 자체에 가치가 있을 수 있어 일단 추적함.
+# 출력을 빼고 싶다면 nbstripout 도구 사용을 권장.
+
+# ─── 프로젝트 데이터 (학습 기록·캐시·DB) ───
+# Checkpointer DB와 학습 세션 DB. 둘 다 첫 실행 시 자동 생성됨.
+# 개인 대화 내용이 담겨있고 바이너리이므로 절대 공개하지 않는다.
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── IDE / 에디터 ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── 빌드 / 배포 산출물 ───
 build/
 dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-.env
+*.egg-info/
+*.egg
