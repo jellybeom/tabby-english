@@ -1,19 +1,24 @@
-"""LangGraph StateGraph 조립 (Phase 2).
+"""LangGraph StateGraph 조립.
 
-세 가지 핵심 학습 요소:
+핵심 학습 요소:
 1. Conditional edges — receive_input 후 signal에 따라 3갈래 분기
-2. Tool node       — generate_ghost가 도구 호출 시 ToolNode로 갔다가 복귀 (ReAct)
-3. Checkpointer    — SqliteSaver로 모든 상태 전이 자동 저장
+2. Checkpointer    — SqliteSaver로 모든 상태 전이 자동 저장
+
+도구 호출은 generate_ghost 노드 내부에서 직접 처리한다 (ToolNode 미사용).
+이렇게 한 이유:
+- 한 번의 invoke = 한 사이클의 깔끔한 시작/끝
+- messages 누적 등 부가 상태 관리 불필요
+- 추천 품질이 일관적
+
+학습 측면에서 ToolNode/ReAct 패턴은 Phase 2 초기 버전에서 다뤘다.
 """
 
 import os
 import sqlite3
 
-from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.prebuilt import ToolNode
 
 from src.nodes import (
     analyze_utterance_node,
@@ -25,12 +30,8 @@ from src.nodes import (
     setup_scenario_node,
 )
 from src.state import ConversationState
-from src.tools import ALL_TOOLS
 
 CHECKPOINT_DB = "data/checkpoints.db"
-
-
-# ─── 라우팅 함수들 ───
 
 
 def _route_by_signal(state: ConversationState) -> str:
@@ -43,20 +44,6 @@ def _route_by_signal(state: ConversationState) -> str:
     }[signal]
 
 
-def _route_after_ghost(state: ConversationState) -> str:
-    """generate_ghost 이후 분기.
-
-    messages의 마지막이 tool_calls를 가진 AIMessage면 → tool_node
-    그렇지 않으면 (ghost_suggestions가 채워졌다는 뜻) → END
-    """
-    messages = state.get("messages", [])
-    if messages:
-        last = messages[-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "tools"
-    return END
-
-
 def build_graph() -> CompiledStateGraph:
     """그래프를 빌드하고 Checkpointer와 함께 컴파일한다."""
     workflow: StateGraph = StateGraph(ConversationState)
@@ -67,7 +54,6 @@ def build_graph() -> CompiledStateGraph:
     workflow.add_node("analyze_utterance", analyze_utterance_node)
     workflow.add_node("generate_ai_response", generate_ai_response_node)
     workflow.add_node("generate_ghost", generate_ghost_node)
-    workflow.add_node("tools", ToolNode(ALL_TOOLS))  # 표준 ToolNode 그대로 사용
     workflow.add_node("generate_feedback", generate_feedback_node)
     workflow.add_node("persist_session", persist_session_node)
 
@@ -78,11 +64,11 @@ def build_graph() -> CompiledStateGraph:
     workflow.add_edge("setup_scenario", "receive_input")
     workflow.add_edge("analyze_utterance", "generate_ai_response")
     workflow.add_edge("generate_ai_response", END)
-    workflow.add_edge("tools", "generate_ghost")  # 도구 결과를 가지고 ghost로 복귀
+    workflow.add_edge("generate_ghost", END)
     workflow.add_edge("generate_feedback", "persist_session")
     workflow.add_edge("persist_session", END)
 
-    # 조건부 엣지 1: signal에 따라 3갈래
+    # 조건부 엣지: signal에 따라 3갈래
     workflow.add_conditional_edges(
         "receive_input",
         _route_by_signal,
@@ -93,17 +79,7 @@ def build_graph() -> CompiledStateGraph:
         },
     )
 
-    # 조건부 엣지 2: tool 호출 여부에 따라 분기
-    workflow.add_conditional_edges(
-        "generate_ghost",
-        _route_after_ghost,
-        {
-            "tools": "tools",
-            END: END,
-        },
-    )
-
-    # Checkpointer를 붙여 컴파일
+    # Checkpointer 컴파일
     os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
     checkpointer = SqliteSaver(conn)

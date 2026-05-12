@@ -1,0 +1,11 @@
+[theme]
+# 부드러운 파스텔 톤 — Phase 3 후반에 더 다듬을 예정
+primaryColor = "#7c6ef2"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f3fa"
+textColor = "#1a1a2e"
+font = "sans serif"
+
+[server]
+# 음성 컴포넌트 도입 대비: 큰 페이로드 허용
+maxUploadSize = 50

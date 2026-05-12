@@ -1,30 +1,31 @@
 """generate_ghost 노드: 머뭇거릴 때 다음 표현 추천.
 
-LangGraph 표준 패턴:
-- State의 messages 필드를 통해 ToolNode와 메시지를 주고받는다.
-- LLM이 도구 호출을 결정하면 AIMessage(tool_calls 포함)를 messages에 누적
-  → 그래프가 자동으로 tool_node로 분기 → ToolMessage가 messages에 누적
-  → 다시 generate_ghost로 돌아오면 누적된 messages를 보고 최종 답변을 만든다.
+설계 원칙 (옵션 A — 직접 도구 호출):
+- 노드 진입 시 도구를 직접 호출하여 컨텍스트 정보를 수집한다.
+- 그 결과를 프롬프트에 주입한 뒤 LLM을 단 1회 호출한다.
+- ReAct 순환(LLM↔ToolNode)을 쓰지 않으므로 messages 누적 문제 없음.
+- 매 호출마다 깔끔하게 시작 → 끝, 일관된 추천 품질.
 """
 
 import json
+import re
 from typing import List, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from src.prompts import GHOST_SUGGESTION_PROMPT
 from src.state import ConversationState, StateUpdate, Utterance
-from src.tools import ALL_TOOLS
+from src.tools.time_tool import get_time_of_day
+from src.tools.weak_points_tool import get_user_weak_points
 
 _llm: Optional[ChatOpenAI] = None
 
 
-def _get_llm():
+def _get_llm() -> ChatOpenAI:
     global _llm
     if _llm is None:
-        base = ChatOpenAI(model="gpt-4o-mini", temperature=0.5)
-        _llm = base.bind_tools(ALL_TOOLS)  # type: ignore[assignment]
+        _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.5)
     return _llm
 
 
@@ -38,51 +39,95 @@ def _format_history(history: List[Utterance]) -> str:
     return "\n".join(lines)
 
 
-def _is_returning_from_tool(messages: List[BaseMessage]) -> bool:
-    """messages의 마지막이 ToolMessage면 도구 실행을 마치고 돌아온 상태."""
-    return bool(messages) and isinstance(messages[-1], ToolMessage)
+def _collect_tool_context() -> str:
+    """도구를 직접 호출해 LLM에 주입할 컨텍스트 정보를 만든다."""
+    time_info = get_time_of_day.invoke({})
+    weak_info = get_user_weak_points.invoke({})
+    return f"- 현재 시간대: {time_info}\n- 학습자 약점 정보: {weak_info}"
 
 
 def generate_ghost_node(state: ConversationState) -> StateUpdate:
-    """LLM 호출. tool 호출이 있으면 messages에 누적, 없으면 ghost_suggestions 채움."""
-    existing: List[BaseMessage] = state.get("messages", [])
+    """추천어 3개 생성. 도구 호출은 노드가 직접 처리."""
+    history = state.get("conversation_history", [])
+    partial = state.get("partial_input", "").strip()
 
-    if _is_returning_from_tool(existing):
-        # 도구 결과를 받고 돌아온 상태: 누적된 messages를 그대로 LLM에 전달
-        messages_for_llm = existing
+    # 직전 발화자 파악
+    if history and history[-1]["role"] == "assistant":
+        last_speaker = "Partner (직전에 Partner가 말했음)"
+    elif history:
+        last_speaker = "You (You가 이어서 말하는 중)"
     else:
-        # 새 silence 요청: prompt를 새로 만들어 시작.
-        # 이전 호출의 잔여 messages가 있어도 무시한다.
-        prompt = GHOST_SUGGESTION_PROMPT.format(
-            scenario=state["scenario"],
-            history=_format_history(state.get("conversation_history", [])),
-        )
-        messages_for_llm = [HumanMessage(content=prompt)]
+        last_speaker = "없음 (You가 대화를 시작)"
 
-    response = _get_llm().invoke(messages_for_llm)
+    # 도구 정보 수집 (항상 호출 — 비용 매우 낮음)
+    tool_context = _collect_tool_context()
 
-    if isinstance(response, AIMessage) and response.tool_calls:
-        # 도구 호출 → messages에 prompt와 응답을 누적해 tool_node로 보낸다.
-        # _is_returning_from_tool=True 케이스에서는 이미 messages에 prompt가 있으므로
-        # 응답만 추가하면 된다.
-        if _is_returning_from_tool(existing):
-            return {"messages": [response]}
-        return {"messages": list(messages_for_llm) + [response]}
+    prompt = GHOST_SUGGESTION_PROMPT.format(
+        scenario=state["scenario"],
+        history=_format_history(history),
+        partial=partial if partial else "(없음 - 처음부터 시작)",
+        last_speaker=last_speaker,
+        tool_context=tool_context,
+    )
 
-    # 도구 호출 없음 → 최종 응답
+    response = _get_llm().invoke([HumanMessage(content=prompt)])
     suggestions = _parse_suggestions(str(response.content))
+
+    # 합치기 검증: partial과 합쳤을 때 단어 중복이 생기는 추천은 자동 보정
+    if partial:
+        suggestions = [_dedupe_overlap(partial, s) for s in suggestions]
+
     return {"ghost_suggestions": suggestions}
 
 
+def _dedupe_overlap(partial: str, suggestion: str) -> str:
+    """미완성과 추천이 합쳐졌을 때 단어가 중복되면 추천의 앞부분을 제거.
+
+    단어 1개 중복뿐 아니라 여러 단어 중복도 처리:
+    - "I think that's" + "that's all for now" → "all for now"
+    - "Can I" + "Can I have the bill" → "have the bill"
+    """
+    partial_words = [w.lower().rstrip(".,!?") for w in partial.strip().split()]
+    suggestion_words = suggestion.strip().split()
+    if not partial_words or not suggestion_words:
+        return suggestion
+
+    suggestion_lower = [w.lower().rstrip(".,!?") for w in suggestion_words]
+
+    # 최대 중복 길이 = min(partial 길이, suggestion 길이)
+    max_overlap = min(len(partial_words), len(suggestion_words))
+
+    # 가장 긴 중복부터 검사하여 첫 매치를 채택
+    for overlap_len in range(max_overlap, 0, -1):
+        partial_tail = partial_words[-overlap_len:]
+        suggestion_head = suggestion_lower[:overlap_len]
+        if partial_tail == suggestion_head and overlap_len < len(suggestion_words):
+            return " ".join(suggestion_words[overlap_len:])
+
+    return suggestion
+
+
 def _parse_suggestions(text: str) -> List[str]:
-    """LLM 응답에서 JSON 배열을 추출한다."""
+    """LLM 응답에서 JSON 배열을 추출. 설명 문장이 섞여 있어도 정확히 분리."""
     text = text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1].lstrip("json").strip()
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(s) for s in parsed][:3]
-    except json.JSONDecodeError:
-        pass
+
+    if "```" in text:
+        match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1)
+
+    match = re.search(r"\[\s*\".*?\"\s*(?:,\s*\".*?\"\s*)*\]", text, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list):
+                return [str(s) for s in parsed][:3]
+        except json.JSONDecodeError:
+            pass
+
+    lines = [line.strip("- *•").strip() for line in text.splitlines()]
+    lines = [line for line in lines if line and len(line) < 100]
+    if lines:
+        return lines[:3]
+
     return [text]
