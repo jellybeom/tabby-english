@@ -1702,6 +1702,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
+    { name = "pandas" },
     { name = "python-dotenv" },
     { name = "streamlit" },
 ]
@@ -1716,8 +1717,9 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=0.2.0" },
     { name = "langgraph", specifier = ">=0.2.0" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0.0" },
+    { name = "pandas", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "streamlit", specifier = ">=1.57.0" },
+    { name = "streamlit", specifier = ">=1.36.0" },
 ]
 
 [package.metadata.requires-dev]

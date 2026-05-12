@@ -37,18 +37,18 @@ def render_ghost_panel(
     clicked_full: Optional[str] = None
     cols = st.columns(len(suggestions))
 
-    for col, suggestion in zip(cols, suggestions):
+    for idx, (col, suggestion) in enumerate(zip(cols, suggestions), start=1):
         # 미완성 + 추천을 결합한 최종 텍스트 (사용자가 보낼 실제 값)
         full_text = _join(partial, suggestion)
 
         with col:
             # 표시는 미완성 부분을 흐릿하게, 이어 붙는 부분을 진하게 보여줌
-            display = _render_chip_label(partial, suggestion)
+            display = _render_chip_label(partial, suggestion, number=idx)
             st.markdown(display, unsafe_allow_html=True)
 
             if st.button(
                 "선택",
-                key=f"ghost_chip_{suggestion}",
+                key=f"ghost_chip_{idx}_{suggestion}",
                 use_container_width=True,
             ):
                 clicked_full = full_text
@@ -69,23 +69,30 @@ def _join(partial: str, suggestion: str) -> str:
     return f"{partial} {suggestion}"
 
 
-def _render_chip_label(partial: str, suggestion: str) -> str:
-    """칩 위에 보여줄 HTML — 미완성은 회색, 추천은 보라색."""
+def _render_chip_label(partial: str, suggestion: str, number: int) -> str:
+    """칩 위에 보여줄 HTML — 번호 배지 + 미완성(회색) + 추천(보라색)."""
     partial = partial.rstrip()
     suggestion = suggestion.lstrip()
-    if partial:
-        return (
-            "<div style='padding:8px 10px; border-radius:6px; "
-            "background:#f4f3fa; text-align:center; "
-            "font-size:14px; line-height:1.4; margin-bottom:4px;'>"
-            f"<span style='color:#888;'>{partial} </span>"
-            f"<span style='color:#7c6ef2; font-weight:600;'>{suggestion}</span>"
-            "</div>"
-        )
+
+    # 작은 원형 배지로 번호 표시
+    badge = (
+        f"<span style='display:inline-block; min-width:18px; height:18px; "
+        f"border-radius:9px; background:#7c6ef2; color:white; "
+        f"font-size:11px; font-weight:600; line-height:18px; "
+        f"text-align:center; margin-right:6px;'>{number}</span>"
+    )
+
+    body = (
+        f"<span style='color:#888;'>{partial} </span>"
+        f"<span style='color:#7c6ef2; font-weight:600;'>{suggestion}</span>"
+        if partial
+        else f"<span style='color:#7c6ef2; font-weight:600;'>{suggestion}</span>"
+    )
+
     return (
         "<div style='padding:8px 10px; border-radius:6px; "
         "background:#f4f3fa; text-align:center; "
         "font-size:14px; line-height:1.4; margin-bottom:4px;'>"
-        f"<span style='color:#7c6ef2; font-weight:600;'>{suggestion}</span>"
+        f"{badge}{body}"
         "</div>"
     )

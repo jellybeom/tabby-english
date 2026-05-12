@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# Streamlit Secrets (로컬 secrets.toml은 커밋 금지, example만 커밋)
+.streamlit/secrets.toml
+
 # ─── Python 가상환경 ───
 .venv/
 venv/
