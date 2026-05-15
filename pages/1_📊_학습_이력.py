@@ -1,8 +1,8 @@
 """학습 이력 대시보드 페이지.
 
-data/sessions.db의 learning_sessions 테이블을 읽어 시각화한다.
-- 누적 통계
-- 시나리오별 분포 (도넛 차트)
+data/sessions.db의 learning_sessions 테이블을 읽어 시각화한다:
+- 누적 통계 (세션 수, 대화 턴, 시나리오 종류, 칭찬 받은 횟수)
+- 시나리오별 학습 분포 (bar chart)
 - 최근 세션 목록
 - 자주 지적된 개선 패턴
 """

@@ -5,6 +5,7 @@ from typing import Annotated, List, Literal, TypedDict
 
 Role = Literal["user", "assistant"]
 Signal = Literal["utterance", "silence", "end_session"]
+InputMode = Literal["keyboard", "voice"]
 
 
 class Utterance(TypedDict):
@@ -31,6 +32,9 @@ class ConversationState(TypedDict):
     scenario: str
     system_prompt: str
 
+    # 입력 방식 — 사용자가 시나리오 선택 직후 한 번 결정
+    input_mode: InputMode
+
     # 입력 (매 턴 갱신)
     raw_input: str  # 완성된 입력 (전송 의도)
     partial_input: str  # 입력창에 타이핑 중인 미완성 텍스트
@@ -51,6 +55,7 @@ class StateUpdate(TypedDict, total=False):
     """노드가 반환할 수 있는 부분 업데이트."""
 
     system_prompt: str
+    input_mode: InputMode
     partial_input: str
     input_signal: Signal
     conversation_history: List[Utterance]

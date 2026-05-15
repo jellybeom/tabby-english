@@ -1,7 +1,7 @@
-"""Phase 2 동작 검증.
+"""LangGraph 노드와 도구의 단위 검증.
 
-LLM 호출 없이 노드의 분기 로직과 도구 정의를 검증한다.
-실행: uv run python -m tests.test_phase2
+LLM 호출 없이 노드의 분기 로직, 누적 동작, 도구 정의를 검증한다.
+실행: uv run python -m tests.test_nodes
 """
 
 from src.nodes.analyze_utterance import analyze_utterance_node

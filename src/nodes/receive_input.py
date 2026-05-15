@@ -1,14 +1,13 @@
 """receive_input 노드: 입력을 보고 signal을 결정한다.
 
 신호 판단 규칙:
-- "end"           → end_session
+- "end"             → end_session
 - "" (빈 raw_input) → silence
   · partial_input이 있으면 "중간에 막힘" 케이스
   · 없으면 "처음부터 막힘" 케이스
-- 그 외           → utterance
+- 그 외             → utterance
 
-옵션 B 방식 — 외부(노트북/UI)는 raw_input과 partial_input만 채우고,
-신호 판단은 LangGraph 안에서 처리한다.
+외부(UI)는 raw_input과 partial_input만 채우고, 신호 판단은 노드 안에서 처리한다.
 """
 
 from src.state import ConversationState, StateUpdate

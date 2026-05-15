@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<!--
+  Tabby English — Ghost Input 컴포넌트
+
+  입력창 안에 회색 ghost text를 표시하고, 음성 입력까지 지원하는 위젯.
+  Streamlit 컴포넌트로 iframe 안에서 동작하며, postMessage로 부모와 통신한다.
+
+  args:
+    default_value : 첫 렌더 시 입력창에 채울 텍스트
+    ghost_text    : 회색으로 표시할 추천
+    input_mode    : "keyboard" | "voice" — voice일 때만 마이크 버튼 노출
+    reset_nonce   : 값이 증가하면 컴포넌트 내부 상태를 초기화
+
+  JS → Python 메시지 타입 (객체로 setComponentValue):
+    request_ghost  : 키보드 3초 / 음성 2.5초 무입력 → 추천 요청
+    ghost_accepted : Tab으로 ghost 채택
+    submit         : Enter로 메시지 전송
+    voice_error    : 음성 인식 실패 (권한 거부 등)
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="./streamlit-component-lib.js"></script>
+
+  <style>
+    body {
+      margin: 0;
+      padding: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* 입력창 + 마이크 버튼을 가로로 나란히 */
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    #editor {
+      flex: 1;
+      min-height: 40px;
+      padding: 10px 12px;
+      font-size: 14px;
+      line-height: 1.4;
+      border: 1px solid #d3d0e0;
+      border-radius: 6px;
+      box-sizing: border-box;
+      outline: none;
+      cursor: text;
+      position: relative;
+      /* HTML 기본 동작인 '연속 공백 압축' 우회 — 입력창 끝의 공백이 보이도록 */
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    #editor:focus {
+      border-color: #7c6ef2;
+    }
+    #editor:empty::before {
+      content: attr(data-placeholder);
+      color: #aaa;
+      pointer-events: none;
+    }
+    .real {
+      color: #1a1a2e;
+    }
+    .ghost {
+      color: #888;
+      opacity: 0.55;
+      /* 사용자가 ghost 영역에 커서를 두거나 클릭하지 못하게 막음 */
+      user-select: none;
+      pointer-events: none;
+    }
+
+    /* 마이크 버튼 */
+    #mic-btn {
+      width: 44px;
+      flex-shrink: 0;
+      border: 1px solid #d3d0e0;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+      font-size: 20px;
+      transition: all 0.2s ease;
+    }
+    #mic-btn:hover {
+      border-color: #7c6ef2;
+      background: #f4f3fa;
+    }
+    #mic-btn.recording {
+      background: #fce7e7;
+      border-color: #e85d5d;
+      animation: mic-pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes mic-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(232, 93, 93, 0.0); }
+      50%      { box-shadow: 0 0 0 6px rgba(232, 93, 93, 0.25); }
+    }
+    #mic-btn.hidden {
+      display: none;
+    }
+
+    #status {
+      font-size: 11px;
+      color: #aaa;
+      margin-top: 6px;
+      min-height: 14px;
+    }
+    #status.waiting  { color: #7c6ef2; }
+    #status.recording { color: #e85d5d; }
+    #status.error     { color: #d63b3b; }
+
+    #tab-hint {
+      display: none;
+      font-size: 11px;
+      color: #7c6ef2;
+      margin-top: 4px;
+    }
+    #tab-hint.visible {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="input-row">
+    <div id="editor"
+         contenteditable="true"
+         spellcheck="false"
+         data-placeholder="영어로 말해보세요...">
+    </div>
+    <button id="mic-btn" class="hidden" title="음성 입력 시작/중지">🎤</button>
+  </div>
+
+  <div id="tab-hint">💡 Tab 키를 누르면 추천을 채택해요</div>
+  <div id="status"></div>
+
+  <script>
+    // ========================================================================
+    // 설정
+    // ========================================================================
+    const GHOST_REQUEST_DELAY_MS = 3000;      // 키보드 무입력 → 추천 요청
+    const VOICE_SILENCE_DELAY_MS = 2500;      // 음성 무음 → 추천 요청
+
+    // ========================================================================
+    // 상태 (single source of truth)
+    // ========================================================================
+    let realText = '';
+    let ghostText = '';
+    let pendingTimer = null;
+    let voiceSilenceTimer = null;
+    let inputMode = 'keyboard';
+    let isRecording = false;
+    let recognition = null;
+    // 사용자가 명시적으로 정지 버튼을 눌렀는지 추적.
+    // true이면 onspeechend가 발생해도 자동 추천 요청을 보내지 않는다.
+    let manualStop = false;
+    // 음성 인식 중 미확정 텍스트 (회색으로 미리 표시되며 realText에는 미반영)
+    let interimVoiceText = '';
+    // Python의 reset 신호 중복 감지용
+    let lastResetNonce = 0;
+    // JS → Python 메시지 중복 감지용
+    let messageNonce = 0;
+
+    const editor = document.getElementById('editor');
+    const micBtn = document.getElementById('mic-btn');
+    const tabHint = document.getElementById('tab-hint');
+    const status = document.getElementById('status');
+
+    // ========================================================================
+    // 렌더링
+    // ========================================================================
+    function render() {
+      // 음성 모드일 때 interim은 ghost 색깔로 미리 표시
+      let displayGhost = ghostText;
+      if (inputMode === 'voice' && interimVoiceText) {
+        displayGhost = interimVoiceText;
+      }
+
+      const realHtml = escapeHtml(realText);
+      const ghostHtml = escapeHtml(displayGhost);
+
+      let html = '';
+      if (realHtml) html += `<span class="real">${realHtml}</span>`;
+      if (ghostHtml) html += `<span class="ghost">${ghostHtml}</span>`;
+      editor.innerHTML = html;
+
+      placeCursorAtEndOfReal();
+      tabHint.classList.toggle('visible', !!ghostText);
+    }
+
+    function placeCursorAtEndOfReal() {
+      const realSpan = editor.querySelector('.real');
+      const selection = window.getSelection();
+      const range = document.createRange();
+      if (realSpan && realSpan.firstChild) {
+        range.setStart(realSpan.firstChild, realSpan.firstChild.length);
+      } else {
+        range.setStart(editor, 0);
+      }
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // ========================================================================
+    // 타이머 — 키보드 무입력 감지
+    // ========================================================================
+    function scheduleGhostRequest() {
+      cancelGhostRequest();
+      if (!realText.trim() || ghostText) return;
+
+      status.textContent = '⏳ 잠시 멈추면 추천이 나타나요...';
+      status.classList.add('waiting');
+
+      pendingTimer = setTimeout(() => {
+        status.textContent = '🔄 추천 생성 중...';
+        sendToPython('request_ghost');
+      }, GHOST_REQUEST_DELAY_MS);
+    }
+
+    function cancelGhostRequest() {
+      if (pendingTimer !== null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      if (!isRecording) {
+        status.textContent = '';
+        status.classList.remove('waiting');
+      }
+    }
+
+    // ========================================================================
+    // 타이머 — 음성 무음 감지
+    // ========================================================================
+    // 음성 결과(onresult)가 들어올 때마다 리셋된다.
+    // 일정 시간 새 결과가 안 들어오면 = 사용자가 멈춤 = 추천 요청.
+    // onspeechend가 늦거나 안 오는 경우의 백업 메커니즘.
+    function scheduleVoiceSilenceRequest() {
+      cancelVoiceSilenceTimer();
+      voiceSilenceTimer = setTimeout(() => {
+        if (manualStop || !isRecording || ghostText) return;
+
+        // interim까지 합쳐 추천 요청을 보낸다.
+        // (인식 엔진이 isFinal로 확정해주지 않은 채 멈춘 경우 대비)
+        if (interimVoiceText && !realText.endsWith(interimVoiceText)) {
+          if (realText && !realText.endsWith(' ')) realText += ' ';
+          realText += interimVoiceText;
+          interimVoiceText = '';
+          render();
+        }
+
+        if (!realText.trim()) return;
+        status.textContent = '🔄 추천 생성 중...';
+        sendToPython('request_ghost');
+      }, VOICE_SILENCE_DELAY_MS);
+    }
+
+    function cancelVoiceSilenceTimer() {
+      if (voiceSilenceTimer !== null) {
+        clearTimeout(voiceSilenceTimer);
+        voiceSilenceTimer = null;
+      }
+    }
+
+    // ========================================================================
+    // 키 입력 처리
+    // ========================================================================
+    // 브라우저의 기본 입력 동작을 차단(preventDefault)하고 우리가 realText를
+    // 직접 갱신한 뒤 render() — DOM과 변수의 단일 진실 흐름을 보장.
+    editor.addEventListener('beforeinput', (e) => {
+      ghostText = '';
+      cancelGhostRequest();
+
+      const inputType = e.inputType;
+      if (inputType === 'insertText' && e.data) {
+        realText += e.data;
+      } else if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+        // Enter — submit으로 처리, 진행 중인 음성이 있으면 함께 중지
+        e.preventDefault();
+        if (realText.trim()) {
+          stopRecognition();
+          sendToPython('submit');
+        }
+        return;
+      } else if (inputType === 'deleteContentBackward') {
+        realText = realText.slice(0, -1);
+      } else if (inputType === 'insertFromPaste' && e.dataTransfer) {
+        realText += e.dataTransfer.getData('text/plain');
+      }
+
+      e.preventDefault();
+      render();
+      scheduleGhostRequest();
+    });
+
+    editor.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        if (ghostText) {
+          realText += ghostText;
+          ghostText = '';
+          cancelGhostRequest();
+          sendToPython('ghost_accepted');
+          render();
+        }
+      }
+    });
+
+    // ========================================================================
+    // 음성 입력 (Web Speech API)
+    // ========================================================================
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    function isVoiceSupported() {
+      return typeof SpeechRecognition !== 'undefined';
+    }
+
+    function setupRecognition() {
+      if (recognition) return recognition;
+      if (!isVoiceSupported()) return null;
+
+      const r = new SpeechRecognition();
+      r.continuous = true;
+      r.interimResults = true;
+      r.lang = 'en-US';
+
+      r.onresult = (event) => {
+        // 새 음성 입력이 들어오면 이전 추천은 무시 의도 → ghost 제거
+        if (ghostText) ghostText = '';
+
+        let interim = '';
+        let newCommitted = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            newCommitted += transcript;
+          } else {
+            interim += transcript;
+          }
+        }
+
+        if (newCommitted) {
+          if (realText && !realText.endsWith(' ')) realText += ' ';
+          realText += newCommitted.trim();
+        }
+        interimVoiceText = interim;
+
+        render();
+        // 결과가 들어올 때마다 무음 타이머 리셋
+        scheduleVoiceSilenceRequest();
+      };
+
+      r.onspeechend = () => {
+        if (manualStop) {
+          status.textContent = '🎤 음성 입력 종료';
+          return;
+        }
+        status.textContent = '🎤 음성 입력 일시 정지';
+        if (realText.trim() && !ghostText) {
+          status.textContent = '🔄 추천 생성 중...';
+          sendToPython('request_ghost');
+        }
+      };
+
+      r.onend = () => {
+        // continuous 모드라도 약 5분 후 자동 종료될 수 있음 → 사용자가 명시
+        // 적으로 중지하지 않았으면 자동 재시작
+        if (isRecording) {
+          try { r.start(); } catch (e) { /* 이미 시작된 상태면 무시 */ }
+        }
+      };
+
+      r.onerror = (event) => {
+        console.error('SpeechRecognition error:', event);
+        const errorMap = {
+          'not-allowed': '🚫 마이크 권한이 거부되었습니다. 브라우저 설정에서 허용해주세요.',
+          'no-speech': '음성이 감지되지 않습니다. 다시 시도해주세요.',
+          'audio-capture': '🚫 마이크에 접근할 수 없습니다.',
+          'network': '🌐 네트워크 오류로 음성 인식이 중단되었습니다.',
+          'service-not-allowed': '🚫 음성 인식 서비스를 사용할 수 없습니다 (HTTPS 또는 권한 문제).',
+          'aborted': '음성 인식이 중단되었습니다.',
+        };
+        status.textContent = errorMap[event.error] || `음성 인식 오류: ${event.error}`;
+        status.classList.add('error');
+        stopRecognition();
+        sendToPython('voice_error');
+      };
+
+      recognition = r;
+      return r;
+    }
+
+    function startRecognition() {
+      const r = setupRecognition();
+      if (!r) {
+        status.textContent = '🚫 이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 또는 Edge를 사용해주세요.';
+        status.classList.add('error');
+        return;
+      }
+
+      try {
+        manualStop = false;
+        r.start();
+        isRecording = true;
+        micBtn.classList.add('recording');
+        micBtn.textContent = '⏹';
+        micBtn.title = '음성 입력 중지';
+        status.textContent = '🎤 음성 입력 중... (말해보세요)';
+        status.classList.add('recording');
+        status.classList.remove('error');
+      } catch (e) {
+        console.error('SpeechRecognition start failed:', e);
+        status.textContent = `🚫 음성 인식 시작 실패: ${e.message}`;
+        status.classList.add('error');
+      }
+    }
+
+    function stopRecognition() {
+      if (recognition && isRecording) {
+        isRecording = false;
+        manualStop = true;
+        cancelVoiceSilenceTimer();
+        try { recognition.stop(); } catch (e) { /* 이미 중지된 상태면 무시 */ }
+      }
+      // 미확정 텍스트(interim)가 남아있으면 realText에 확정 반영
+      if (interimVoiceText.trim()) {
+        if (realText && !realText.endsWith(' ')) realText += ' ';
+        realText += interimVoiceText.trim();
+        interimVoiceText = '';
+      }
+      micBtn.classList.remove('recording');
+      micBtn.textContent = '🎤';
+      micBtn.title = '음성 입력 시작';
+      status.classList.remove('recording');
+      render();
+    }
+
+    micBtn.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecognition();
+      } else {
+        startRecognition();
+      }
+    });
+
+    // ========================================================================
+    // Streamlit 통신
+    // ========================================================================
+    function sendToPython(messageType) {
+      messageNonce += 1;
+      Streamlit.setComponentValue({
+        type: messageType,
+        text: realText,
+        nonce: messageNonce,
+      });
+    }
+
+    function onRender(event) {
+      const args = event.detail.args;
+
+      // 첫 렌더에 default_value를 real에 한 번만 채움
+      if (!editor.dataset.initialized) {
+        if (args.default_value) {
+          realText = args.default_value;
+        }
+        editor.dataset.initialized = 'true';
+      }
+
+      // Python이 reset_nonce를 증가시켜 보냈으면 입력창 비우기
+      if (args.reset_nonce !== undefined && args.reset_nonce > lastResetNonce) {
+        lastResetNonce = args.reset_nonce;
+        realText = '';
+        ghostText = '';
+        interimVoiceText = '';
+        cancelGhostRequest();
+        cancelVoiceSilenceTimer();
+        if (isRecording) stopRecognition();
+      }
+
+      // input_mode 갱신 — voice일 때만 마이크 버튼 표시
+      if (args.input_mode !== undefined) {
+        inputMode = args.input_mode;
+        if (inputMode === 'voice') {
+          if (isVoiceSupported()) {
+            micBtn.classList.remove('hidden');
+          } else {
+            status.textContent = '⚠️ 이 브라우저는 음성 인식을 지원하지 않습니다. Chrome 또는 Edge 권장.';
+            status.classList.add('error');
+          }
+        } else {
+          micBtn.classList.add('hidden');
+        }
+      }
+
+      // Python이 새 ghost를 보냈으면 반영
+      if (args.ghost_text !== undefined && args.ghost_text !== ghostText) {
+        ghostText = args.ghost_text;
+        cancelGhostRequest();
+        if (ghostText) {
+          status.textContent = '✨ 추천이 도착했어요. Tab으로 채택, 계속 입력하면 무시';
+        }
+      }
+
+      render();
+    }
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+
+    Streamlit.setComponentReady();
+    Streamlit.setFrameHeight(130);
+  </script>
+</body>
+</html>

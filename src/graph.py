@@ -1,16 +1,12 @@
 """LangGraph StateGraph 조립.
 
-핵심 학습 요소:
-1. Conditional edges — receive_input 후 signal에 따라 3갈래 분기
-2. Checkpointer    — SqliteSaver로 모든 상태 전이 자동 저장
+receive_input 노드가 input_signal을 결정하고, 조건부 엣지가 3갈래로 분기한다:
+- utterance   → analyze_utterance → generate_ai_response → END
+- silence     → generate_ghost → END
+- end_session → generate_feedback → persist_session → END
 
-도구 호출은 generate_ghost 노드 내부에서 직접 처리한다 (ToolNode 미사용).
-이렇게 한 이유:
-- 한 번의 invoke = 한 사이클의 깔끔한 시작/끝
-- messages 누적 등 부가 상태 관리 불필요
-- 추천 품질이 일관적
-
-학습 측면에서 ToolNode/ReAct 패턴은 Phase 2 초기 버전에서 다뤘다.
+도구 호출(get_time_of_day, get_user_weak_points)은 generate_ghost 노드 내부에서
+직접 처리해 한 번의 invoke가 깔끔한 시작/끝 사이클을 갖도록 한다.
 """
 
 import os
